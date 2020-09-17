@@ -1,19 +1,46 @@
 """
     MUCM emulator for single outputs.
 
-    This is the most updated piece of code.
-
     Author: Sam Coveney
     Data: 21-04-2020
+
+    TODO:
+    * replace the weird MUCM nugget parameterization with a standard one? Why is MUCM inconsistent on this point?
+      -> I have done this replacement... I assume it does not affect the ability to integrate out sigma successfully... Jeremy's thesis suggests it's okay
+
+    * from "Uncertainty Analysis and other Inference Tools for Complex Computer Codes":
+      "The first is that a(.) can usually only be `computed' subject to observation error. If we can assume that observation errors are normally distributed, then only a simple modification of the theory is needed. The main complication is that the error variance becomes another hyperparameter to be estimated."
+    * from "Some Bayesian Numerical Analysis", in the section on smooth, O'Hagan expicitly says that "we simply add Vf (diagonal matrix of noise) to A as defined in 7)"
+
+    NOTE: This means that in this 'integrate out sigma' formulation, we have sigma^2 * (A + nugget * I). In other words, the noise would be sigma^2 * nugget.
+          This is an important caveat!
+
+
 """
 
 from abc import ABC, abstractmethod
 
 import numpy as np
 
+import scipy
 from scipy.spatial.distance import pdist, cdist, squareform
 from scipy import linalg
 from scipy.optimize import minimize
+
+
+#{{{ use '@timeit' to decorate a function for timing
+import time
+def timeit(f):
+    def timed(*args, **kw):
+        ts = time.time()
+        num = 30
+        for r in range(num): # calls function 100 times
+            result = f(*args, **kw)
+        te = time.time()
+        print('func: %r took: %2.4f sec for %d runs' % (f.__name__, te-ts, num) )
+        return result
+    return timed
+#}}}
 
 
 class AbstractModel(ABC):
@@ -110,7 +137,8 @@ class AbstractModel(ABC):
         n, q = self.x.shape[0], self.H.shape[1]
 
         ## calculate LLH
-        try:
+        #try:
+        if True:
             L = linalg.cho_factor(A)        
             invA_y = linalg.cho_solve(L, y)
             invA_H = linalg.cho_solve(L, H)
@@ -127,16 +155,50 @@ class AbstractModel(ABC):
             if get_sigma_beta: return [s2, B]
 
             LLH = -0.5*(-(n-q)*np.log(s2) - logdetA - logdetQ)
+
+        else:
+    
+            # second test with cholesky directly
+            L = np.linalg.cholesky(A)        
+
+            L_y = scipy.linalg.solve_triangular(L, y, lower = True)
+
+            # Q = H A-1 H
+            L_H = scipy.linalg.solve_triangular(L, H, lower = True)
+            Q = L_H.T.dot(L_H)
+            LQ = np.linalg.cholesky(Q) # NOTE: should really be renamed to something other than K
+
+            logdetA = 2.0*np.sum(np.log(np.diag(L)))
+            logdetQ = 2.0*np.sum(np.log(np.diag(LQ)))
             
-            return LLH
+            # calculate B = y.T A^-1 H (H A^-1 H)^-1 H A^-1 y
+            # note that 'beta' is (H A^-1 H)^-1 H A^-1 y
+            tmp = L_H.T.dot(L_y) # H A^-1 y
+            tmp = scipy.linalg.solve_triangular(LQ, tmp, lower = True)
+            B = np.dot(tmp.T, tmp)
 
-        except np.linalg.linalg.LinAlgError as e:
-            print("  WARNING: Matrix not PSD for", guess, ", not fit.")
-            return None
+            s2 = (1.0/(n-q-2.0))*( np.dot(L_y.T, L_y) - B )
 
-        except ValueError as e:
-            print("  WARNING: Ill-conditioned matrix for", guess, ", not fit.")
-            return None
+            # NOTE: beta is actually (H A^-1 H)^-1 H A^-1 y, so with this method I can't just extract beta, will need a separate routine
+            if get_sigma_beta:
+                c = scipy.linalg.solve_triangular(LQ, tmp, lower = True)
+                beta = scipy.linalg.solve_triangular(LQ.T, c, lower = False)
+                    
+                return [s2, beta]
+
+
+            LLH = -0.5*(-(n-q)*np.log(s2) - logdetA - logdetQ)
+
+            
+        return LLH
+
+#        except np.linalg.linalg.LinAlgError as e:
+#            print("  WARNING: Matrix not PSD for", guess, ", not fit.")
+#            return None
+#
+#        except ValueError as e:
+#            print("  WARNING: Ill-conditioned matrix for", guess, ", not fit.")
+#            return None
     #}}}
     
 
@@ -185,9 +247,11 @@ class AbstractModel(ABC):
 
         for ng, g in enumerate(guess):
             optFail = False
-            try:
+            #try:
+            if True:
                 bestStr = "   "
-                res = minimize(self.LLH, g, args = (False), method = 'Nelder-Mead') 
+                #res = minimize(self.LLH, g, args = (False), method = 'Nelder-Mead') 
+                res = minimize(self.LLH, g, args = (False), method = 'L-BFGS-B') 
 
                 if np.isfinite(res.fun):
                     try:
@@ -204,8 +268,8 @@ class AbstractModel(ABC):
                       "| %s" % ' | '.join(map(str, [fmt(i) for i in self.HP_untransform(res.x)])),
                       "| {:s} llh: {:.3f}".format(bestStr, -1.0*np.around(res.fun, decimals=4)))
 
-            except TypeError as e:
-                optFail = True
+            #except TypeError as e:
+            #    optFail = True
 
         self.s2, self.beta = self.LLH(bestRes.x, get_sigma_beta = True)
         self.HP = self.HP_untransform(bestRes.x)
@@ -214,7 +278,9 @@ class AbstractModel(ABC):
 
         print("\nHyperParams:", ", ".join(map(str, [fmt(i) for i in self.HP])), \
               "\n  (s2: {:f})".format(self.s2),
-              "\n  (nugget: {:f})".format(self.nugget))
+              "\n  (beta:", ", ".join(map(str, [fmt(i) for i in self.beta])), ")", 
+              "\n  (nugget: {:f})".format(self.nugget), 
+              "\n  (noise var = s2*nugget: {:f})".format(self.nugget*self.s2) )
 
     #}}}
 
@@ -238,7 +304,7 @@ class AbstractModel(ABC):
 
         # NOTE: calculate pointwise posterior only
         #A_pred = self.A_matrix_cross(X, X, self.nugget)
-        A_pred = (1-self.nugget)
+        A_pred = 1.0
 
         H_pred = self.H_matrix(X)
 
@@ -277,6 +343,7 @@ class AbstractModel(ABC):
 #{{{ RBF abstract class
 class RBF(AbstractModel):
     """ A matrix: RBF kernel, used for other classes that implement a specific basis.
+        Note that the nugget is 'within' the covariance, so will be multiplied by the variance.
     """
 
     def HP_transform(self, HP):
@@ -291,17 +358,11 @@ class RBF(AbstractModel):
         """A matrix between training data inputs."""
 
         w = 1.0 / self.lengthscale
-
-        # r^2 = | x_i - x_j |^2 / lenghscale^2
         A = pdist(self.x*w,'sqeuclidean')
-
-        # exp( - r^2 ) 
-        self.expUT = np.exp(-A)
-
-        # (1 - nugget)
-        A = (1.0 - nugget)*self.expUT 
+        A = np.exp(-A)
         A = squareform(A)
-        np.fill_diagonal(A , 1.0)
+
+        np.fill_diagonal(A , 1 + nugget)
 
         return A
 
@@ -310,12 +371,8 @@ class RBF(AbstractModel):
         """A matrix more generally."""
 
         w = 1.0 / self.lengthscale
-
-        # r^2 = | x_i - x_j |^2 / lenghscale^2
         A = cdist(xi*w, xj*w,'sqeuclidean')
-
-        # (1 - nugget) * exp( - r^2 ) 
-        A = (1.0 - nugget)*np.exp(-A)
+        A = np.exp(-A)
 
         return A
  
