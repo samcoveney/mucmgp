@@ -18,8 +18,6 @@
 
 """
 
-from abc import ABC, abstractmethod
-
 import numpy as np
 
 import scipy
@@ -28,15 +26,13 @@ from scipy import linalg
 from scipy.optimize import minimize
 
 from functools import partial
+import inspect
 
 import jax.numpy as jnp
 from jax import jit, jacfwd, grad, value_and_grad, config
 from jax.scipy.linalg import solve_triangular as jst
-
-# this accuracy allows us to get the correct answer
 config.update('jax_enable_x64', True)
 
-import inspect
 
 
 #{{{ use '@timeit' to decorate a function for timing
@@ -54,33 +50,17 @@ def timeit(f):
 #}}}
 
 
-#class AbstractModel(ABC):
-#    """Abstract class for MUCM emulator, requiring basis and kernel to be implemented elsewhere."""
-#
-#    def __init__(self):
-#        """Initialize class."""
-#
-#        super().__init__()
-#
-#
-#    #{{{ abstract methods for H matrix and A matrix
-#
-#    @abstractmethod
-#    def kernel.A_matrix(self):
-#        """Kernel matrix (not multiplied by signal variance)."""
-#        pass
-#
-#    @abstractmethod
-#    def basis(self, X):
-#        """Defines the regressor basis matrix H."""
-#        pass
-#
-#    #}}}
-
-
 class Emulator:
-    """GP Emulator class"""
+    """ Emulator class.
 
+        Initialize example (RBF and Linear can be important from this package):
+
+        model = Emulator(kernel = RBF(dim = 5), basis = Linear)
+
+    """
+
+
+    #{{{ init
     def __init__(self, kernel, basis):
 
         try:
@@ -91,6 +71,7 @@ class Emulator:
 
         self.kernel = kernel 
         self.basis = basis
+    #}}}
 
 
     # {{{ data handling including scalings
@@ -253,21 +234,17 @@ class Emulator:
 
 
         #{{{ jit autograd setup for LLH
-        # NOTE: apparently, as fix for lbfgs and jit - https://github.com/google/jax/issues/1510
-        #@partial(jit, static_argnums=(0))
-        #LLH_func = lambda x: np.array(jax.jit(g_rosen)(x))
-
-        # grad only; requires to force it into a numpy array
-        #grad_llh = grad(self.LLH)
-        #grad_func = lambda x: np.array(jit(grad_llh)(x)) # FIXME: probably doesn't need the jit bit here
+        # NOTE: To use jax with lbfgs, need to wrap returns to cast to numpy array - https://github.com/google/jax/issues/1510
+        #       e.g.
+        #       grad_llh = grad(self.LLH)
+        #       grad_func = lambda x: np.array(jit(grad_llh)(x))  # not sure if this extra jit here is needed
+        #       Also, to use 32-bit, need to cast resulting answer to 64-bit; however, results are poor/wrong with 32-bit
 
         # value and grad
         new_llh = value_and_grad(self.LLH)
-        newer_llh = lambda x, y: [ np.array(val) for val in new_llh(x, y) ]
+        #newer_llh = lambda x, y: [ np.array(val) for val in new_llh(x, y) ]
+        newer_llh = lambda x, y: [ np.array(val) for val in jit(new_llh)(x, y) ]
 
-        # require this if using 32-bit precision; need to use 'reg_func' in minimize instead; but 32-bit does not seem accurate enough
-        #grad_func = lambda x: np.array(jit(grad_llh)(x), dtype = np.float64)
-        #reg_func = lambda x: np.array(self.LLH(x), dtype = np.float64)
         #}}}
         
 
@@ -397,81 +374,4 @@ class Emulator:
 
     #}}}
 
-
-# types of emulator (different combinations of kernels and basis functions)
-
-##{{{ various subclasses
-#
-##{{{ RBF abstract class
-#class RBF(AbstractModel):
-#    """ A matrix: RBF kernel, used for other classes that implement a specific basis.
-#    """
-#
-#    @partial(jit, static_argnums=(0))
-#    def kernel.HP_transform(self, HP): return jnp.log(HP)
-#
-#    @partial(jit, static_argnums=(0))
-#    def kernel.HP_untransform(self, HP): return jnp.exp(HP)
-#
-#    @partial(jit, static_argnums=(0))
-#    def kernel.A_matrix(self, lengthscale, xi, xj):
-#        """A matrix between training data inputs."""
-#
-#        # NOTE: matrix is symmetric when xi = xj, so doing too much work here... But JAX arrays are immutable, so difficult to used triangular matrix indices
-#
-#        w = 1.0 / lengthscale 
-#        sqdiff =  ((xi*w)[:,None] -  (xj*w))**2
-#        expon = jnp.einsum('ijk->ij', sqdiff)
-#        A = jnp.exp(-expon)
-#
-#        return A
-# 
-#    @abstractmethod
-#    def basis(self, X):
-#        pass
-#
-##}}}
-#
-##{{{ RBF + linear basis
-#class RBF_linear(RBF):
-#    """ A matrix: RBF kernel. H matrix: linear.
-#    """
-#
-#    def basis(self, X):
-#        """Linear mean function."""
-#        H = np.hstack( [np.ones((X.shape[0],1)) , X] )
-#        return H
-#
-##}}}
-#
-##{{{ RBF + constant basis
-#class RBF_constant(RBF):
-#    """ A matrix: RBF kernel. H matrix: constrant.
-#    """
-#
-#    def basis(self, X):
-#        """Constant mean function."""
-#        H = np.ones((X.shape[0],1))
-#        return H
-#
-##}}}
-#
-##{{{ RBF + custom H matrix
-#class RBF_custom(RBF):
-#    """ A matrix: RBF kernel. H matrix: custom, user must implement basis by attaching a function to it, or defining it here.
-#
-#        Example (user defined constant basis):
-#
-#            model = RBF_custom()
-#            def basis(x): return np.ones((x.shape[0],1))
-#            model.basis = basis
-#
-#    """
-#
-#    def basis(self):
-#        pass
-#
-##}}}
-#
-##}}}
 
